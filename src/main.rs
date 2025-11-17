@@ -1,6 +1,8 @@
 use clap::{Parser, Subcommand};
 use std::ffi::OsString;
 
+mod state;
+
 #[derive(Parser, Debug)]
 #[command(name = "typervox", about = "Voice keyboard daemon and CLI")]
 struct Cli {
