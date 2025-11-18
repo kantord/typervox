@@ -39,16 +39,43 @@ impl Engine for MockEngine {
 
 #[cfg(feature = "engine-ct2")]
 #[derive(Debug)]
-pub struct Ct2Engine;
+pub struct Ct2Engine {
+    whisper: ct2rs::Whisper,
+}
+
+#[cfg(feature = "engine-ct2")]
+const DEFAULT_MODEL_ID: &str = "guillaumekln/faster-whisper-small";
+
+#[cfg(feature = "engine-ct2")]
+impl Ct2Engine {
+    pub fn new_default() -> Result<Self, EngineError> {
+        Self::new(DEFAULT_MODEL_ID)
+    }
+
+    pub fn new(model_id: &str) -> Result<Self, EngineError> {
+        let path = ct2rs::download_model(model_id)
+            .map_err(|e| EngineError::Decode(format!("model download: {e}")))?;
+        let whisper = ct2rs::Whisper::new(path, ct2rs::Config::default())
+            .map_err(|e| EngineError::Decode(format!("model load: {e}")))?;
+        Ok(Self { whisper })
+    }
+}
 
 #[cfg(feature = "engine-ct2")]
 #[async_trait]
 impl Engine for Ct2Engine {
     async fn decode(&self, audio: &CapturedAudio) -> Result<EngineResult, EngineError> {
-        // Placeholder: real implementation should run ct2rs model inference.
+        let options = ct2rs::WhisperOptions::default();
+        let start = std::time::Instant::now();
+        let result = self
+            .whisper
+            .generate(&audio.samples, None, false, &options)
+            .map_err(|e| EngineError::Decode(format!("{e}")))?;
+        let decode_ms = start.elapsed().as_millis() as u64;
+        let text = result.into_iter().next().unwrap_or_default();
         Ok(EngineResult {
-            text: format!("len={}", audio.samples.len()),
-            decode_ms: 0,
+            text,
+            decode_ms,
             lang: "en".to_string(),
         })
     }

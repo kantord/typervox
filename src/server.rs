@@ -88,6 +88,23 @@ pub fn router_with_config(
     state: Arc<Mutex<QueueState>>,
     config: ServerConfig,
 ) -> Router {
+    let engine: Arc<dyn Engine + Send + Sync> = {
+        #[cfg(all(feature = "engine-ct2"))]
+        {
+            match crate::engine::Ct2Engine::new_default() {
+                Ok(e) => Arc::new(e),
+                Err(err) => {
+                    eprintln!("ct2 engine init failed, falling back to mock: {err}");
+                    Arc::new(crate::engine::MockEngine)
+                }
+            }
+        }
+        #[cfg(not(feature = "engine-ct2"))]
+        {
+            Arc::new(crate::engine::MockEngine)
+        }
+    };
+
     Router::new()
         .route("/v1/status", get(get_status))
         .route("/v1/start", post(post_start))
@@ -95,7 +112,7 @@ pub fn router_with_config(
         .with_state(AppState::new(
             state,
             Box::<MockCapture>::default(),
-            Arc::new(MockEngine),
+            engine,
             config,
         ))
 }
