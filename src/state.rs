@@ -45,7 +45,7 @@ impl QueueState {
         self.queue.is_empty()
     }
 
-    pub fn enqueue(&mut self, request_id: impl Into<String>, context: Context, since_ms: u64) {
+    pub fn enqueue(&mut self, request_id: impl Into<String>, context: Context, since_ms: u64) -> usize {
         let item = Item {
             request_id: request_id.into(),
             context,
@@ -53,16 +53,14 @@ impl QueueState {
             since_ms,
         };
         self.queue.push_back(item);
+        self.queue.len() - 1
     }
 
     /// Marks the head item as recording if any.
     pub fn promote(&mut self) -> Option<&Item> {
         if let Some(front) = self.queue.front_mut() {
             front.recording = true;
-            // SAFETY: Borrow checker is satisfied because we finish using front_mut before taking
-            // another immutable borrow.
-            let idx = 0;
-            return self.queue.get(idx);
+            return self.queue.front();
         }
         None
     }
@@ -103,6 +101,12 @@ pub struct StatusSnapshot {
     pub ok: bool,
     pub active_request_id: Option<String>,
     pub queue: Vec<Item>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Transcript {
+    pub text: String,
+    pub decode_ms: u64,
 }
 
 #[cfg(test)]

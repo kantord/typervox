@@ -4,6 +4,7 @@ use tokio::sync::Mutex;
 
 mod state;
 mod server;
+mod capture;
 
 #[derive(Parser, Debug)]
 #[command(name = "typervox", about = "Voice keyboard daemon and CLI")]

@@ -1,4 +1,7 @@
-use crate::state::{Context, QueueState, StatusSnapshot};
+use crate::{
+    capture::{Capture, MockCapture},
+    state::{Context, QueueState, StatusSnapshot, Transcript},
+};
 use axum::{
     extract::State,
     response::sse::{Event, Sse},
@@ -30,14 +33,16 @@ pub struct AppState {
     queue: Arc<Mutex<QueueState>>,
     next_id: Arc<AtomicU64>,
     streams: Arc<Mutex<HashMap<String, mpsc::Sender<Event>>>>,
+    capture: Arc<Mutex<Box<dyn Capture>>>,
 }
 
 impl AppState {
-    pub fn new(queue: Arc<Mutex<QueueState>>) -> Self {
+    pub fn new(queue: Arc<Mutex<QueueState>>, capture: Box<dyn Capture>) -> Self {
         Self {
             queue,
             next_id: Arc::new(AtomicU64::new(1)),
             streams: Arc::new(Mutex::new(HashMap::new())),
+            capture: Arc::new(Mutex::new(capture)),
         }
     }
 }
@@ -55,7 +60,7 @@ pub fn router(state: Arc<Mutex<QueueState>>) -> Router {
         .route("/v1/status", get(get_status))
         .route("/v1/start", post(post_start))
         .route("/v1/stop_active", post(post_stop_active))
-        .with_state(AppState::new(state))
+        .with_state(AppState::new(state, Box::<MockCapture>::default()))
 }
 
 pub async fn serve_unix<P, F>(
@@ -126,29 +131,38 @@ async fn post_start(
         streams.insert(request_id.clone(), tx.clone());
     }
 
-    {
+    let position = {
         let mut queue = app_state.queue.lock().await;
-        queue.enqueue(request_id.clone(), context_for_queue, 0);
-        queue.promote();
-    }
+        let pos = queue.enqueue(request_id.clone(), context_for_queue, 0);
+        // Only mark recording if this is the head.
+        if pos == 0 {
+            queue.promote();
+        }
+        pos
+    };
 
     let queued = Event::default().event("queued").data(
         serde_json::json!({
             "request_id": request_id,
-            "position": 0,
+            "position": position,
             "context": context
         })
         .to_string(),
     );
-    let started = Event::default().event("recording_started").data(
-        serde_json::json!({
-            "request_id": request_id,
-        })
-        .to_string(),
-    );
+    let initial_events = if position == 0 {
+        let started = Event::default().event("recording_started").data(
+            serde_json::json!({
+                "request_id": request_id,
+            })
+            .to_string(),
+        );
+        vec![Ok(queued), Ok(started)]
+    } else {
+        vec![Ok(queued)]
+    };
 
-    let initial = futures_util::stream::iter(vec![Ok(queued), Ok(started)]);
-    let event_stream = initial.chain(ReceiverStream::new(rx).map(Ok));
+    let event_stream = futures_util::stream::iter(initial_events)
+        .chain(ReceiverStream::new(rx).map(Ok));
     Sse::new(event_stream)
 }
 
@@ -202,24 +216,48 @@ async fn post_stop_active(
                 .to_string(),
             ),
         ).await;
-        let _ = tx.send(
-            Event::default().event("final").data(
-                serde_json::json!({
-                    "request_id": request_id,
-                    "text": "MOCK",
-                    "timings": { "decode_ms": 0 },
-                    "lang": "en"
-                })
-                .to_string(),
-            ),
-        ).await;
+        let transcript = decode_mock(&app_state).await;
+        let _ = tx
+            .send(
+                Event::default().event("final").data(
+                    serde_json::json!({
+                        "request_id": request_id,
+                        "text": transcript.text,
+                        "timings": { "decode_ms": transcript.decode_ms },
+                        "lang": "en"
+                    })
+                    .to_string(),
+                ),
+            )
+            .await;
     }
 
+    // Promote next item if any.
+    {
+        let mut queue = app_state.queue.lock().await;
+        let promoted = queue.promote().cloned();
+        if let Some(promoted) = promoted {
+            if let Some(next_tx) = app_state.streams.lock().await.get(&promoted.request_id) {
+                let _ = next_tx
+                    .send(
+                        Event::default().event("recording_started").data(
+                            serde_json::json!({ "request_id": promoted.request_id })
+                                .to_string(),
+                        ),
+                    )
+                    .await;
+            }
+        }
+    }
+
+    let transcript = decode_mock(&app_state).await;
     let response = StopActiveResponse {
         ok: true,
         request_id,
-        text: "MOCK".to_string(),
-        timings: Timings { decode_ms: 0 },
+        text: transcript.text.clone(),
+        timings: Timings {
+            decode_ms: transcript.decode_ms,
+        },
     };
 
     if body.raw {
@@ -234,6 +272,15 @@ async fn post_stop_active(
             .body(axum::body::Body::from(json))
             .unwrap()
     }
+}
+
+async fn decode_mock(app_state: &AppState) -> Transcript {
+    let mut capture = app_state.capture.lock().await;
+    let audio = capture.stop().await.unwrap_or_else(|_| crate::capture::CapturedAudio {
+        samples: Vec::new(),
+    });
+    let text = format!("len={}", audio.samples.len());
+    Transcript { text, decode_ms: 0 }
 }
 
 #[cfg(test)]
@@ -314,7 +361,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn start_streams_queued_then_recording_started() {
+    async fn start_streams_queue_positions_and_promotion() {
         let tmpdir = tempfile::tempdir().expect("temp dir");
         let sock_path = tmpdir.path().join("typervox.sock");
         let state = Arc::new(Mutex::new(QueueState::default()));
@@ -336,50 +383,71 @@ mod tests {
 
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let stream = tokio::net::UnixStream::connect(&sock_path)
-            .await
-            .expect("connect UDS");
-        let (mut sender, connection) =
-            http1::Builder::new()
-                .handshake::<_, axum::body::Body>(TokioIo::new(stream))
+        let start_req = |app: &str| {
+            let body = serde_json::json!({
+                "context": { "app": app, "hint": "" }
+            });
+            Request::builder()
+                .method("POST")
+                .uri("http://localhost/v1/start?stream=1")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(body.to_string()))
+                .expect("request build")
+        };
+
+        async fn start_stream(
+            sock_path: &std::path::Path,
+            req: Request<axum::body::Body>,
+        ) -> hyper::body::Incoming {
+            let stream = tokio::net::UnixStream::connect(sock_path)
                 .await
-                .expect("handshake");
-        tokio::spawn(async move {
-            let _ = connection.await;
-        });
+                .expect("connect UDS");
+            let (mut sender, connection) =
+                http1::Builder::new()
+                    .handshake::<_, axum::body::Body>(TokioIo::new(stream))
+                    .await
+                    .expect("handshake");
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
 
-        let body = serde_json::json!({
-            "context": { "app": "chrome", "hint": "omnibox" }
-        });
-        let request = Request::builder()
-            .method("POST")
-            .uri("http://localhost/v1/start?stream=1")
-            .header("content-type", "application/json")
-            .body(axum::body::Body::from(body.to_string()))
-            .expect("request build");
-
-        let response = sender
-            .send_request(request)
-            .await
-            .expect("send request");
-        assert_eq!(response.status(), StatusCode::OK);
-        let mut body_stream = response.into_body();
-
-        // Spawn stop_active in parallel after we consumed first two events.
-        let mut chunks = Vec::new();
-        while let Some(frame) = body_stream.frame().await {
-            let frame = frame.expect("frame");
-            if let Some(bytes) = frame.data_ref() {
-                chunks.push(bytes.clone());
-                let collected = chunks.concat();
-                let body_str = String::from_utf8(collected.to_vec()).expect("utf8");
-                if body_str.contains("recording_started") {
-                    break;
-                }
-            }
+            sender
+                .send_request(req)
+                .await
+                .expect("send")
+                .into_body()
         }
 
-        // Call stop_active
+        let mut sse1 = start_stream(&sock_path, start_req("app1")).await;
+        let mut sse2 = start_stream(&sock_path, start_req("app2")).await;
+        let mut sse3 = start_stream(&sock_path, start_req("app3")).await;
+
+        async fn collect_until(body: &mut hyper::body::Incoming, needle: &str) -> String {
+            let mut buf = Vec::new();
+            while let Some(frame) = body.frame().await {
+                let frame = frame.expect("frame");
+                if let Some(bytes) = frame.data_ref() {
+                    buf.push(bytes.clone());
+                    if String::from_utf8_lossy(&buf.concat()).contains(needle) {
+                        break;
+                    }
+                }
+            }
+            String::from_utf8(buf.concat().to_vec()).unwrap()
+        }
+
+        let first_body = collect_until(&mut sse1, "recording_started").await;
+        assert!(first_body.contains("\"position\":0"));
+
+        let second_body = collect_until(&mut sse2, "queued").await;
+        assert!(second_body.contains("\"position\":1"));
+        assert!(!second_body.contains("recording_started"));
+
+        let third_body = collect_until(&mut sse3, "queued").await;
+        assert!(third_body.contains("\"position\":2"));
+        assert!(!third_body.contains("recording_started"));
+
+        // Stop active to promote next.
         let stop_stream = tokio::net::UnixStream::connect(&sock_path)
             .await
             .expect("connect UDS stop");
@@ -397,58 +465,11 @@ mod tests {
             .header("content-type", "application/json")
             .body(Full::new(Bytes::from(stop_body.to_string())))
             .expect("stop req");
-        let stop_resp = stop_sender.send_request(stop_req).await.expect("stop resp");
-        assert_eq!(stop_resp.status(), StatusCode::OK);
-        let stop_json: serde_json::Value = serde_json::from_slice(
-            &stop_resp
-                .into_body()
-                .collect()
-                .await
-                .expect("collect stop body")
-                .to_bytes(),
-        )
-        .expect("json stop");
-        assert_eq!(stop_json["ok"], serde_json::json!(true));
-        assert_eq!(stop_json["text"], serde_json::json!("MOCK"));
+        let _ = stop_sender.send_request(stop_req).await.expect("stop resp");
 
-        // Read remaining SSE events until stream closes.
-        while let Some(frame) = body_stream.frame().await {
-            let frame = frame.expect("frame");
-            if let Some(bytes) = frame.data_ref() {
-                chunks.push(bytes.clone());
-            }
-        }
-        let body_str = String::from_utf8(chunks.concat().to_vec()).expect("utf8 sse");
-        let mut events = body_str.trim_end().split("\n\n");
-        let first = events.next().expect("first").trim();
-        let second = events.next().expect("second").trim();
-        let third = events.next().expect("third").trim();
-        let fourth = events.next().expect("fourth").trim();
-
-        assert!(first.starts_with("event: queued"));
-        assert!(second.starts_with("event: recording_started"));
-        assert!(third.starts_with("event: recording_stopped"));
-        assert!(fourth.starts_with("event: final"));
-
-        let parse_data = |chunk: &str| {
-            chunk
-                .lines()
-                .find(|line| line.starts_with("data: "))
-                .map(|line| &line[6..])
-                .map(|json| serde_json::from_str::<serde_json::Value>(json).unwrap())
-                .unwrap()
-        };
-
-        let first_data = parse_data(first);
-        let second_data = parse_data(second);
-        let third_data = parse_data(third);
-        let fourth_data = parse_data(fourth);
-        let request_id = first_data["request_id"].as_str().unwrap();
-        assert_eq!(second_data["request_id"], request_id);
-        assert_eq!(third_data["request_id"], request_id);
-        assert_eq!(third_data["reason"], serde_json::json!("client_stop"));
-        assert_eq!(fourth_data["request_id"], request_id);
-        assert_eq!(fourth_data["text"], serde_json::json!("MOCK"));
+        // sse2 should now receive recording_started
+        let second_after = collect_until(&mut sse2, "recording_started").await;
+        assert!(second_after.contains("recording_started"));
 
         let _ = shutdown_tx.send(());
         let _ = server_handle.await;

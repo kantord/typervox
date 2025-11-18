@@ -14,6 +14,7 @@ futures-util = "0.3.31"
 tokio-stream = { version = "0.1.15", features = ["net"] }
 hyper-util = { version = "0.1.7", features = ["server", "tokio", "http1"] }
 bytes = "1.7.1"
+async-trait = "0.1.83"
 
 [dev-dependencies]
 reqwest = { version = "0.12.8", default-features = false, features = ["json", "http2", "rustls-tls", "gzip", "brotli", "deflate"] }
