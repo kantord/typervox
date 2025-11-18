@@ -10,7 +10,7 @@ pub enum CaptureError {
 }
 
 #[async_trait]
-pub trait Capture: Send + Sync {
+pub trait Capture: Send + Sync + 'static {
     async fn start(&mut self) -> Result<(), CaptureError>;
     async fn stop(&mut self) -> Result<CapturedAudio, CaptureError>;
 }

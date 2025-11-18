@@ -6,6 +6,7 @@ use crate::{
 use axum::{
     extract::State,
     response::sse::{Event, Sse},
+    response::IntoResponse,
     routing::{get, post},
     BoxError, Json, Router,
 };
@@ -35,17 +36,24 @@ pub struct AppState {
     next_id: Arc<AtomicU64>,
     streams: Arc<Mutex<HashMap<String, mpsc::Sender<Event>>>>,
     capture: Arc<Mutex<Box<dyn Capture>>>,
-    engine: Arc<Box<dyn Engine>>,
+    engine: Arc<dyn Engine + Send + Sync>,
+    config: ServerConfig,
 }
 
 impl AppState {
-    pub fn new(queue: Arc<Mutex<QueueState>>, capture: Box<dyn Capture>) -> Self {
+    pub fn new(
+        queue: Arc<Mutex<QueueState>>,
+        capture: Box<dyn Capture>,
+        engine: Arc<dyn Engine + Send + Sync>,
+        config: ServerConfig,
+    ) -> Self {
         Self {
             queue,
             next_id: Arc::new(AtomicU64::new(1)),
             streams: Arc::new(Mutex::new(HashMap::new())),
             capture: Arc::new(Mutex::new(capture)),
-            engine: Arc::new(Box::new(MockEngine)),
+            engine,
+            config,
         }
     }
 }
@@ -58,12 +66,39 @@ pub enum ServerError {
     Serve(#[from] BoxError),
 }
 
-pub fn router(state: Arc<Mutex<QueueState>>) -> Router {
+#[derive(Clone, Copy)]
+pub struct ServerConfig {
+    pub max_queue_len: usize,
+    pub max_record_ms: u64,
+}
+
+impl Default for ServerConfig {
+    fn default() -> Self {
+        Self {
+            max_queue_len: 64,
+            max_record_ms: 60_000,
+        }
+    }
+}
+
+pub fn router_with_config(
+    state: Arc<Mutex<QueueState>>,
+    config: ServerConfig,
+) -> Router {
     Router::new()
         .route("/v1/status", get(get_status))
         .route("/v1/start", post(post_start))
         .route("/v1/stop_active", post(post_stop_active))
-        .with_state(AppState::new(state, Box::<MockCapture>::default()))
+        .with_state(AppState::new(
+            state,
+            Box::<MockCapture>::default(),
+            Arc::new(MockEngine),
+            config,
+        ))
+}
+
+pub fn router(state: Arc<Mutex<QueueState>>) -> Router {
+    router_with_config(state, ServerConfig::default())
 }
 
 pub async fn serve_unix<P, F>(
@@ -119,7 +154,7 @@ struct StartRequest {
 async fn post_start(
     State(app_state): State<AppState>,
     Json(body): Json<StartRequest>,
-) -> Sse<impl futures_util::Stream<Item = Result<Event, Infallible>>> {
+) -> axum::response::Response {
     let request_id = format!(
         "rq_{}",
         app_state.next_id.fetch_add(1, Ordering::Relaxed)
@@ -136,10 +171,19 @@ async fn post_start(
 
     let position = {
         let mut queue = app_state.queue.lock().await;
+        if queue.len() >= app_state.config.max_queue_len {
+            let payload = serde_json::json!({"error": "queue-full"});
+            return axum::response::Response::builder()
+                .status(axum::http::StatusCode::TOO_MANY_REQUESTS)
+                .header(axum::http::header::CONTENT_TYPE, "application/json")
+                .body(axum::body::Body::from(payload.to_string()))
+                .unwrap();
+        }
         let pos = queue.enqueue(request_id.clone(), context_for_queue, 0);
         // Only mark recording if this is the head.
         if pos == 0 {
             queue.promote();
+            start_capture(&app_state).await;
         }
         pos
     };
@@ -152,7 +196,7 @@ async fn post_start(
         })
         .to_string(),
     );
-    let initial_events = if position == 0 {
+    let initial_events: Vec<Result<Event, Infallible>> = if position == 0 {
         let started = Event::default().event("recording_started").data(
             serde_json::json!({
                 "request_id": request_id,
@@ -166,7 +210,7 @@ async fn post_start(
 
     let event_stream = futures_util::stream::iter(initial_events)
         .chain(ReceiverStream::new(rx).map(Ok));
-    Sse::new(event_stream)
+    Sse::new(event_stream).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -192,12 +236,8 @@ async fn post_stop_active(
     State(app_state): State<AppState>,
     Json(body): Json<StopActiveRequest>,
 ) -> axum::response::Response {
-    let stopped = {
-        let mut queue = app_state.queue.lock().await;
-        queue.stop_active(crate::state::StopReason::ClientStop)
-    };
-
-    let Some(stopped) = stopped else {
+    let outcome = finish_active(app_state.clone(), crate::state::StopReason::ClientStop).await;
+    let Some((request_id, transcript)) = outcome else {
         let payload = serde_json::json!({"ok": false, "error": "not-recording"});
         return axum::response::Response::builder()
             .status(axum::http::StatusCode::BAD_REQUEST)
@@ -206,14 +246,54 @@ async fn post_stop_active(
             .unwrap();
     };
 
+    if body.raw {
+        axum::response::Response::builder()
+            .header(axum::http::header::CONTENT_TYPE, "text/plain")
+            .body(axum::body::Body::from(format!("{}\n", transcript.text)))
+            .unwrap()
+    } else {
+        let json = serde_json::json!({
+            "ok": true,
+            "request_id": request_id,
+            "text": transcript.text,
+            "timings": { "decode_ms": transcript.decode_ms }
+        })
+        .to_string();
+        axum::response::Response::builder()
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(json))
+            .unwrap()
+    }
+}
+
+async fn start_capture(app_state: &AppState) {
+    let mut capture = app_state.capture.lock().await;
+    let _ = capture.start().await;
+}
+
+async fn finish_active(
+    app_state: AppState,
+    reason: crate::state::StopReason,
+) -> Option<(String, Transcript)> {
+    let stopped = {
+        let mut queue = app_state.queue.lock().await;
+        queue.stop_active(reason)
+    }?;
+
     let request_id = stopped.item.request_id.clone();
 
+    let transcript = decode_mock(&app_state).await;
     if let Some(tx) = app_state.streams.lock().await.remove(&request_id) {
+        let reason_str = match reason {
+            crate::state::StopReason::ClientStop => "client_stop",
+            crate::state::StopReason::Timeout => "timeout",
+            crate::state::StopReason::Cancel => "cancel",
+        };
         let _ = tx.send(
             Event::default().event("recording_stopped").data(
                 serde_json::json!({
                     "request_id": request_id,
-                    "reason": "client_stop",
+                    "reason": reason_str,
                     "captured_ms": 0
                 })
                 .to_string(),
@@ -227,7 +307,7 @@ async fn post_stop_active(
                         "request_id": request_id,
                         "text": transcript.text,
                         "timings": { "decode_ms": transcript.decode_ms },
-                        "lang": "en"
+                        "lang": transcript.lang
                     })
                     .to_string(),
                 ),
@@ -240,6 +320,7 @@ async fn post_stop_active(
         let mut queue = app_state.queue.lock().await;
         let promoted = queue.promote().cloned();
         if let Some(promoted) = promoted {
+            start_capture(&app_state).await;
             if let Some(next_tx) = app_state.streams.lock().await.get(&promoted.request_id) {
                 let _ = next_tx
                     .send(
@@ -253,28 +334,7 @@ async fn post_stop_active(
         }
     }
 
-    let transcript = decode_mock(&app_state).await;
-    let response = StopActiveResponse {
-        ok: true,
-        request_id,
-        text: transcript.text.clone(),
-        timings: Timings {
-            decode_ms: transcript.decode_ms,
-        },
-    };
-
-    if body.raw {
-        axum::response::Response::builder()
-            .header(axum::http::header::CONTENT_TYPE, "text/plain")
-            .body(axum::body::Body::from(format!("{}\n", response.text)))
-            .unwrap()
-    } else {
-        let json = serde_json::to_string(&response).expect("serialize response");
-        axum::response::Response::builder()
-            .header(axum::http::header::CONTENT_TYPE, "application/json")
-            .body(axum::body::Body::from(json))
-            .unwrap()
-    }
+    Some((request_id, transcript))
 }
 
 async fn decode_mock(app_state: &AppState) -> Transcript {

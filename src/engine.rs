@@ -10,7 +10,7 @@ pub enum EngineError {
 }
 
 #[async_trait]
-pub trait Engine: Send + Sync {
+pub trait Engine: Send + Sync + 'static {
     async fn decode(&self, audio: &CapturedAudio) -> Result<EngineResult, EngineError>;
 }
 
