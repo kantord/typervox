@@ -1,5 +1,6 @@
 use crate::{
     capture::{Capture, MockCapture},
+    engine::{Engine, EngineResult, MockEngine},
     state::{Context, QueueState, StatusSnapshot, Transcript},
 };
 use axum::{
@@ -34,6 +35,7 @@ pub struct AppState {
     next_id: Arc<AtomicU64>,
     streams: Arc<Mutex<HashMap<String, mpsc::Sender<Event>>>>,
     capture: Arc<Mutex<Box<dyn Capture>>>,
+    engine: Arc<Box<dyn Engine>>,
 }
 
 impl AppState {
@@ -43,6 +45,7 @@ impl AppState {
             next_id: Arc::new(AtomicU64::new(1)),
             streams: Arc::new(Mutex::new(HashMap::new())),
             capture: Arc::new(Mutex::new(capture)),
+            engine: Arc::new(Box::new(MockEngine)),
         }
     }
 }
@@ -279,8 +282,20 @@ async fn decode_mock(app_state: &AppState) -> Transcript {
     let audio = capture.stop().await.unwrap_or_else(|_| crate::capture::CapturedAudio {
         samples: Vec::new(),
     });
-    let text = format!("len={}", audio.samples.len());
-    Transcript { text, decode_ms: 0 }
+    let engine = app_state.engine.clone();
+    let res = engine
+        .decode(&audio)
+        .await
+        .unwrap_or_else(|_| EngineResult {
+            text: "".to_string(),
+            decode_ms: 0,
+            lang: "en".to_string(),
+        });
+    Transcript {
+        text: res.text,
+        decode_ms: res.decode_ms,
+        lang: res.lang,
+    }
 }
 
 #[cfg(test)]

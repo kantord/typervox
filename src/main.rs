@@ -5,6 +5,8 @@ use tokio::sync::Mutex;
 mod state;
 mod server;
 mod capture;
+mod client;
+mod engine;
 
 #[derive(Parser, Debug)]
 #[command(name = "typervox", about = "Voice keyboard daemon and CLI")]
@@ -19,7 +21,26 @@ enum Command {
         #[arg(long, default_value_os = "/tmp/typervox.sock")]
         socket: PathBuf,
     },
-    Status,
+    Status {
+        #[arg(long, default_value_os = "/tmp/typervox.sock")]
+        socket: PathBuf,
+    },
+    Start {
+        #[arg(long)]
+        app: String,
+        #[arg(long, default_value = "")]
+        hint: String,
+        #[arg(long, default_value_os = "/tmp/typervox.sock")]
+        socket: PathBuf,
+        #[arg(long, default_value_t = true)]
+        stream: bool,
+    },
+    StopActive {
+        #[arg(long, default_value_os = "/tmp/typervox.sock")]
+        socket: PathBuf,
+        #[arg(long, default_value_t = false)]
+        raw: bool,
+    },
 }
 
 fn parse_cli<I, T>(args: I) -> Cli
@@ -46,10 +67,37 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Command::Status => {
-            // Status command will be implemented in later milestones.
-            println!("status command is not yet implemented");
+        Command::Status { socket } => {
+            match client::get_status(&socket).await {
+                Ok(status) => {
+                    println!("{}", serde_json::to_string(&status).unwrap());
+                }
+                Err(err) => {
+                    eprintln!("status failed: {err}");
+                    std::process::exit(1);
+                }
+            }
         }
+        Command::Start {
+            app,
+            hint,
+            socket,
+            stream: _,
+        } => {
+            if let Err(err) = client::start_stream(&socket, &app, &hint).await {
+                eprintln!("start failed: {err}");
+                std::process::exit(1);
+            }
+        }
+        Command::StopActive { socket, raw } => match client::stop_active(&socket, raw).await {
+            Ok(body) => {
+                print!("{body}");
+            }
+            Err(err) => {
+                eprintln!("stop_active failed: {err}");
+                std::process::exit(1);
+            }
+        },
     }
 }
 
@@ -71,6 +119,11 @@ mod tests {
     #[test]
     fn parses_status_subcommand() {
         let cli = parse_cli(["typervox", "status"]);
-        assert_eq!(cli.command, Command::Status);
+        assert_eq!(
+            cli.command,
+            Command::Status {
+                socket: PathBuf::from("/tmp/typervox.sock")
+            }
+        );
     }
 }

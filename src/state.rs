@@ -107,6 +107,7 @@ pub struct StatusSnapshot {
 pub struct Transcript {
     pub text: String,
     pub decode_ms: u64,
+    pub lang: String,
 }
 
 #[cfg(test)]
