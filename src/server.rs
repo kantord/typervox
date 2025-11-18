@@ -16,6 +16,7 @@ use serde::Deserialize;
 use std::{
     convert::Infallible,
     future::Future,
+    time::Duration,
     path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -38,6 +39,7 @@ pub struct AppState {
     capture: Arc<Mutex<Box<dyn Capture>>>,
     engine: Arc<dyn Engine + Send + Sync>,
     config: ServerConfig,
+    timeout_handle: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
 }
 
 impl AppState {
@@ -54,6 +56,7 @@ impl AppState {
             capture: Arc::new(Mutex::new(capture)),
             engine,
             config,
+            timeout_handle: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -184,6 +187,7 @@ async fn post_start(
         if pos == 0 {
             queue.promote();
             start_capture(&app_state).await;
+            schedule_timeout(app_state.clone(), request_id.clone()).await;
         }
         pos
     };
@@ -271,10 +275,36 @@ async fn start_capture(app_state: &AppState) {
     let _ = capture.start().await;
 }
 
+async fn schedule_timeout(app_state: AppState, expected_request: String) {
+    let duration = Duration::from_millis(app_state.config.max_record_ms);
+    let state_for_task = app_state.clone();
+    let handle = tokio::spawn(async move {
+        tokio::time::sleep(duration).await;
+        let active = {
+            let queue = state_for_task.queue.lock().await;
+            queue.snapshot().active_request_id
+        };
+        if active.as_deref() == Some(expected_request.as_str()) {
+            let _ = finish_active(state_for_task.clone(), crate::state::StopReason::Timeout).await;
+        }
+    });
+    let abort = handle.abort_handle();
+    let mut slot = app_state.timeout_handle.lock().await;
+    if let Some(prev) = slot.replace(abort) {
+        prev.abort();
+    }
+}
+
 async fn finish_active(
     app_state: AppState,
     reason: crate::state::StopReason,
 ) -> Option<(String, Transcript)> {
+    if reason != crate::state::StopReason::Timeout {
+        if let Some(handle) = app_state.timeout_handle.lock().await.take() {
+            handle.abort();
+        }
+    }
+
     let stopped = {
         let mut queue = app_state.queue.lock().await;
         queue.stop_active(reason)
