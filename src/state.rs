@@ -45,7 +45,12 @@ impl QueueState {
         self.queue.is_empty()
     }
 
-    pub fn enqueue(&mut self, request_id: impl Into<String>, context: Context, since_ms: u64) -> usize {
+    pub fn enqueue(
+        &mut self,
+        request_id: impl Into<String>,
+        context: Context,
+        since_ms: u64,
+    ) -> usize {
         let item = Item {
             request_id: request_id.into(),
             context,
@@ -69,7 +74,10 @@ impl QueueState {
     pub fn stop_active(&mut self, reason: StopReason) -> Option<StoppedItem> {
         if let Some(mut front) = self.queue.pop_front() {
             front.recording = false;
-            Some(StoppedItem { item: front, reason })
+            Some(StoppedItem {
+                item: front,
+                reason,
+            })
         } else {
             None
         }

@@ -2,11 +2,11 @@ use clap::{Parser, Subcommand};
 use std::{ffi::OsString, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
-mod state;
-mod server;
 mod capture;
 mod client;
 mod engine;
+mod server;
+mod state;
 
 #[derive(Parser, Debug)]
 #[command(name = "typervox", about = "Voice keyboard daemon and CLI")]
@@ -67,17 +67,15 @@ async fn main() {
                 std::process::exit(1);
             }
         }
-        Command::Status { socket } => {
-            match client::get_status(&socket).await {
-                Ok(status) => {
-                    println!("{}", serde_json::to_string(&status).unwrap());
-                }
-                Err(err) => {
-                    eprintln!("status failed: {err}");
-                    std::process::exit(1);
-                }
+        Command::Status { socket } => match client::get_status(&socket).await {
+            Ok(status) => {
+                println!("{}", serde_json::to_string(&status).unwrap());
             }
-        }
+            Err(err) => {
+                eprintln!("status failed: {err}");
+                std::process::exit(1);
+            }
+        },
         Command::Start {
             app,
             hint,

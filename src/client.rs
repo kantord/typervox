@@ -1,7 +1,7 @@
 use crate::state::StatusSnapshot;
 use axum::body::Body;
 use http_body_util::BodyExt;
-use hyper::{client::conn::http1, Request};
+use hyper::{Request, client::conn::http1};
 use hyper_util::rt::TokioIo;
 use serde::Deserialize;
 use std::path::Path;

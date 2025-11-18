@@ -548,8 +548,6 @@ dependencies = [
 [[package]]
 name = "ct2rs"
 version = "0.9.13"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7f31e31891043b7d1c1cc1148f7482e44e336f19b0849394c1c54a45270900d2"
 dependencies = [
  "anyhow",
  "cmake",
@@ -558,7 +556,6 @@ dependencies = [
  "hf-hub",
  "mel_spec",
  "ndarray",
- "sentencepiece",
  "serde",
  "serde_json",
  "tokenizers",
@@ -1696,17 +1693,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "num-derive"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ed3955f1a9c7c0c15e092f9c887db08b1fc683305fdf6eb6684f22555355e202"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "num-integer"
 version = "0.1.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2011,29 +1997,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5ee95bc4ef87b8d5ba32e8b7714ccc834865276eab0aed5c9958d00ec45f49e8"
 dependencies = [
  "unicode-ident",
-]
-
-[[package]]
-name = "prost"
-version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7231bd9b3d3d33c86b58adbac74b5ec0ad9f496b19d22801d773636feaa95f3d"
-dependencies = [
- "bytes",
- "prost-derive",
-]
-
-[[package]]
-name = "prost-derive"
-version = "0.14.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
-dependencies = [
- "anyhow",
- "itertools",
- "proc-macro2",
- "quote",
- "syn",
 ]
 
 [[package]]
@@ -2422,32 +2385,6 @@ checksum = "cc1f0cbffaac4852523ce30d8bd3c5cdc873501d96ff467ca09b6767bb8cd5c0"
 dependencies = [
  "core-foundation-sys",
  "libc",
-]
-
-[[package]]
-name = "sentencepiece"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ffd6b3200e8a889de07f7b449367b6bb33970a97cd7ec6ebf3d25aef0880db5a"
-dependencies = [
- "libc",
- "num-derive",
- "num-traits",
- "prost",
- "prost-derive",
- "sentencepiece-sys",
- "thiserror 2.0.17",
-]
-
-[[package]]
-name = "sentencepiece-sys"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8b63807dd454316f8d12af1c6d5cd182eacb6f94ebee5d059a1fe6fdcafaf61a"
-dependencies = [
- "cc",
- "cmake",
- "pkg-config",
 ]
 
 [[package]]

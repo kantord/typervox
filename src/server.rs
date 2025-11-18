@@ -4,30 +4,30 @@ use crate::{
     state::{Context, QueueState, StatusSnapshot, Transcript},
 };
 use axum::{
-    extract::State,
-    response::sse::{Event, Sse},
-    response::IntoResponse,
-    routing::{get, post},
     BoxError, Json, Router,
+    extract::State,
+    response::IntoResponse,
+    response::sse::{Event, Sse},
+    routing::{get, post},
 };
 use futures_util::StreamExt;
 use hyper_util::{rt::TokioIo, server::conn::auto::Builder, service::TowerToHyperService};
 use serde::Deserialize;
 use std::{
+    collections::HashMap,
     convert::Infallible,
     future::Future,
-    time::Duration,
     path::Path,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
-    collections::HashMap,
+    time::Duration,
 };
 use thiserror::Error;
 use tokio::{
     net::UnixListener,
-    sync::{mpsc, Mutex},
+    sync::{Mutex, mpsc},
 };
 use tokio_stream::{wrappers::ReceiverStream, wrappers::UnixListenerStream};
 
@@ -84,10 +84,7 @@ impl Default for ServerConfig {
     }
 }
 
-pub fn router_with_config(
-    state: Arc<Mutex<QueueState>>,
-    config: ServerConfig,
-) -> Router {
+pub fn router_with_config(state: Arc<Mutex<QueueState>>, config: ServerConfig) -> Router {
     let engine: Arc<dyn Engine + Send + Sync> = {
         #[cfg(all(feature = "engine-ct2"))]
         {
@@ -175,10 +172,7 @@ async fn post_start(
     State(app_state): State<AppState>,
     Json(body): Json<StartRequest>,
 ) -> axum::response::Response {
-    let request_id = format!(
-        "rq_{}",
-        app_state.next_id.fetch_add(1, Ordering::Relaxed)
-    );
+    let request_id = format!("rq_{}", app_state.next_id.fetch_add(1, Ordering::Relaxed));
 
     let StartRequest { context } = body;
     let context_for_queue = context.clone();
@@ -229,8 +223,8 @@ async fn post_start(
         vec![Ok(queued)]
     };
 
-    let event_stream = futures_util::stream::iter(initial_events)
-        .chain(ReceiverStream::new(rx).map(Ok));
+    let event_stream =
+        futures_util::stream::iter(initial_events).chain(ReceiverStream::new(rx).map(Ok));
     Sse::new(event_stream).into_response()
 }
 
@@ -336,16 +330,18 @@ async fn finish_active(
             crate::state::StopReason::Timeout => "timeout",
             crate::state::StopReason::Cancel => "cancel",
         };
-        let _ = tx.send(
-            Event::default().event("recording_stopped").data(
-                serde_json::json!({
-                    "request_id": request_id,
-                    "reason": reason_str,
-                    "captured_ms": 0
-                })
-                .to_string(),
-            ),
-        ).await;
+        let _ = tx
+            .send(
+                Event::default().event("recording_stopped").data(
+                    serde_json::json!({
+                        "request_id": request_id,
+                        "reason": reason_str,
+                        "captured_ms": 0
+                    })
+                    .to_string(),
+                ),
+            )
+            .await;
         let transcript = decode_mock(&app_state).await;
         let _ = tx
             .send(
@@ -369,14 +365,12 @@ async fn finish_active(
         if let Some(promoted) = promoted {
             start_capture(&app_state).await;
             if let Some(next_tx) = app_state.streams.lock().await.get(&promoted.request_id) {
-                let _ = next_tx
-                    .send(
-                        Event::default().event("recording_started").data(
-                            serde_json::json!({ "request_id": promoted.request_id })
-                                .to_string(),
-                        ),
-                    )
-                    .await;
+                let _ =
+                    next_tx
+                        .send(Event::default().event("recording_started").data(
+                            serde_json::json!({ "request_id": promoted.request_id }).to_string(),
+                        ))
+                        .await;
             }
         }
     }
@@ -386,9 +380,12 @@ async fn finish_active(
 
 async fn decode_mock(app_state: &AppState) -> Transcript {
     let mut capture = app_state.capture.lock().await;
-    let audio = capture.stop().await.unwrap_or_else(|_| crate::capture::CapturedAudio {
-        samples: Vec::new(),
-    });
+    let audio = capture
+        .stop()
+        .await
+        .unwrap_or_else(|_| crate::capture::CapturedAudio {
+            samples: Vec::new(),
+        });
     let engine = app_state.engine.clone();
     let res = engine
         .decode(&audio)
@@ -411,7 +408,7 @@ mod tests {
     use crate::state::QueueState;
     use bytes::Bytes;
     use http_body_util::{BodyExt, Full};
-    use hyper::{client::conn::http1, Request, StatusCode};
+    use hyper::{Request, StatusCode, client::conn::http1};
     use hyper_util::rt::TokioIo;
     use std::time::Duration;
     use tokio::sync::oneshot;
@@ -427,11 +424,9 @@ mod tests {
         let server_handle = tokio::spawn({
             let socket_path = sock_path.clone();
             async move {
-                serve_unix(
-                    socket_path,
-                    router,
-                    async { let _ = shutdown_rx.await; },
-                )
+                serve_unix(socket_path, router, async {
+                    let _ = shutdown_rx.await;
+                })
                 .await
                 .unwrap();
             }
@@ -443,11 +438,10 @@ mod tests {
         let stream = tokio::net::UnixStream::connect(&sock_path)
             .await
             .expect("connect UDS");
-        let (mut sender, connection) =
-            http1::Builder::new()
-                .handshake::<_, axum::body::Body>(TokioIo::new(stream))
-                .await
-                .expect("handshake");
+        let (mut sender, connection) = http1::Builder::new()
+            .handshake::<_, axum::body::Body>(TokioIo::new(stream))
+            .await
+            .expect("handshake");
         tokio::spawn(async move {
             let _ = connection.await;
         });
@@ -458,10 +452,7 @@ mod tests {
             .body(axum::body::Body::empty())
             .expect("request build");
 
-        let response = sender
-            .send_request(request)
-            .await
-            .expect("send request");
+        let response = sender.send_request(request).await.expect("send request");
         assert_eq!(response.status(), StatusCode::OK);
         let body = response
             .into_body()
@@ -469,8 +460,7 @@ mod tests {
             .await
             .expect("collect body")
             .to_bytes();
-        let json: serde_json::Value =
-            serde_json::from_slice(&body).expect("json body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("json body");
         let expected = serde_json::json!({
             "ok": true,
             "active_request_id": null,
@@ -493,11 +483,9 @@ mod tests {
         let server_handle = tokio::spawn({
             let socket_path = sock_path.clone();
             async move {
-                serve_unix(
-                    socket_path,
-                    router,
-                    async { let _ = shutdown_rx.await; },
-                )
+                serve_unix(socket_path, router, async {
+                    let _ = shutdown_rx.await;
+                })
                 .await
                 .unwrap();
             }
@@ -524,20 +512,15 @@ mod tests {
             let stream = tokio::net::UnixStream::connect(sock_path)
                 .await
                 .expect("connect UDS");
-            let (mut sender, connection) =
-                http1::Builder::new()
-                    .handshake::<_, axum::body::Body>(TokioIo::new(stream))
-                    .await
-                    .expect("handshake");
+            let (mut sender, connection) = http1::Builder::new()
+                .handshake::<_, axum::body::Body>(TokioIo::new(stream))
+                .await
+                .expect("handshake");
             tokio::spawn(async move {
                 let _ = connection.await;
             });
 
-            sender
-                .send_request(req)
-                .await
-                .expect("send")
-                .into_body()
+            sender.send_request(req).await.expect("send").into_body()
         }
 
         let mut sse1 = start_stream(&sock_path, start_req("app1")).await;
@@ -573,12 +556,13 @@ mod tests {
         let stop_stream = tokio::net::UnixStream::connect(&sock_path)
             .await
             .expect("connect UDS stop");
-        let (mut stop_sender, stop_conn) =
-            http1::Builder::new()
-                .handshake::<_, Full<Bytes>>(TokioIo::new(stop_stream))
-                .await
-                .expect("handshake stop");
-        tokio::spawn(async move { let _ = stop_conn.await; });
+        let (mut stop_sender, stop_conn) = http1::Builder::new()
+            .handshake::<_, Full<Bytes>>(TokioIo::new(stop_stream))
+            .await
+            .expect("handshake stop");
+        tokio::spawn(async move {
+            let _ = stop_conn.await;
+        });
 
         let stop_body = serde_json::json!({ "raw": false });
         let stop_req = Request::builder()

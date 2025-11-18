@@ -33,11 +33,7 @@ impl Capture for MockCapture {
 
     async fn stop(&mut self) -> Result<CapturedAudio, CaptureError> {
         let norm = 32768f32;
-        let samples = self
-            .frames
-            .iter()
-            .map(|s| *s as f32 / norm)
-            .collect();
+        let samples = self.frames.iter().map(|s| *s as f32 / norm).collect();
         Ok(CapturedAudio { samples })
     }
 }
