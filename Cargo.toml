@@ -17,6 +17,7 @@ bytes = "1.7.1"
 async-trait = "0.1.83"
 hyper = { version = "1.4.1", features = ["client", "http1"] }
 http-body-util = "0.1.3"
+ct2rs = { version = "0.9.13", optional = true, default-features = false }
 
 [dev-dependencies]
 reqwest = { version = "0.12.8", default-features = false, features = ["json", "http2", "rustls-tls", "gzip", "brotli", "deflate"] }
@@ -27,4 +28,4 @@ predicates = "3.1.2"
 [features]
 default = ["mock-engine"]
 mock-engine = []
-engine-ct2 = []
+engine-ct2 = ["ct2rs"]

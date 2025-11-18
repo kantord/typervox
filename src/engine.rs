@@ -44,8 +44,13 @@ pub struct Ct2Engine;
 #[cfg(feature = "engine-ct2")]
 #[async_trait]
 impl Engine for Ct2Engine {
-    async fn decode(&self, _audio: &CapturedAudio) -> Result<EngineResult, EngineError> {
-        unimplemented!("ct2 engine not wired yet")
+    async fn decode(&self, audio: &CapturedAudio) -> Result<EngineResult, EngineError> {
+        // Placeholder: real implementation should run ct2rs model inference.
+        Ok(EngineResult {
+            text: format!("len={}", audio.samples.len()),
+            decode_ms: 0,
+            lang: "en".to_string(),
+        })
     }
 }
 
@@ -64,5 +69,18 @@ mod tests {
             .unwrap();
         assert_eq!(res.text, "len=2");
         assert_eq!(res.lang, "en");
+    }
+
+    #[cfg(feature = "engine-ct2")]
+    #[tokio::test]
+    async fn ct2_engine_compiles() {
+        let engine = Ct2Engine;
+        let res = engine
+            .decode(&CapturedAudio {
+                samples: vec![0.0, 1.0, 2.0],
+            })
+            .await
+            .unwrap();
+        assert_eq!(res.text, "len=3");
     }
 }
