@@ -35,7 +35,7 @@ fn init_engine() -> Result<Engine> {
 
     let mut config = Config::default();
     config.device = Device::CPU;
-    config.compute_type = ComputeType::INT8;
+    config.compute_type = ComputeType::AUTO;
 
     let whisper = Whisper::new(&model_dir, config)
         .with_context(|| format!("loading whisper model from {}", model_dir.display()))?;
