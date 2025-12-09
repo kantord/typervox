@@ -10,11 +10,14 @@ use anyhow::{Context, Result, anyhow};
 use ct2rs::sys::get_device_count;
 use ct2rs::{ComputeType, Config, Device, Whisper, WhisperOptions, download_model};
 
-const DEFAULT_MODEL_ID: &str = "Systran/faster-whisper-tiny.en";
+// Default to a lightweight model for low-latency CPU decoding.
+const DEFAULT_MODEL_ID: &str = "Systran/faster-whisper-base.en";
 const DEFAULT_LANG: &str = "en";
-const CHUNK_MS: u64 = 100;
-const DECODE_INTERVAL_MS: u64 = 1_000;
-const MAX_BUFFER_SECS: usize = 30;
+const CHUNK_MS: u64 = 40;
+const DECODE_INTERVAL_MS: u64 = 150;
+// Keep a short rolling buffer to keep decode latency low.
+const MAX_BUFFER_SECS: usize = 3;
+const DECODE_SLICE_SECS: usize = 2;
 
 struct Engine {
     whisper: Whisper,
@@ -51,7 +54,7 @@ fn init_engine() -> Result<Engine> {
 
     ensure_preprocessor_config(&model_dir)?;
 
-    let compute_type = ComputeType::AUTO;
+    let compute_type = ComputeType::INT8;
     let mut last_err: Option<anyhow::Error> = None;
 
     for device in device_candidates() {
@@ -119,8 +122,18 @@ fn ensure_preprocessor_config(model_dir: &Path) -> Result<()> {
 }
 
 fn open_alsa_capture(sample_rate: u32) -> Result<PCM> {
-    let pcm = PCM::new("default", Direction::Capture, false)
+    let device_name = "default";
+    let pcm = PCM::new(device_name, Direction::Capture, false)
         .context("opening ALSA capture on default device")?;
+    if let Ok(info) = pcm.info() {
+        eprintln!(
+            "capturing from ALSA '{}': card={}, device={}, name={:?}",
+            device_name,
+            info.get_card(),
+            info.get_device(),
+            info.get_name().unwrap_or("unknown")
+        );
+    }
 
     {
         let hwp = HwParams::any(&pcm).context("creating ALSA HW params")?;
@@ -148,6 +161,8 @@ fn capture_loop(pcm: PCM, engine: Engine) -> Result<()> {
 
     let mut options = WhisperOptions::default();
     options.beam_size = 1;
+    options.max_length = 64; // keep decoding very short for low latency
+    let mut last_output = String::new();
 
     loop {
         let mut chunk = vec![0i16; chunk_len];
@@ -166,7 +181,16 @@ fn capture_loop(pcm: PCM, engine: Engine) -> Result<()> {
         if last_decode.elapsed() >= Duration::from_millis(DECODE_INTERVAL_MS)
             && audio_buffer.len() >= engine.sample_rate / 2
         {
-            transcribe_and_print(&engine, &audio_buffer, &mut last_printed_len, &options)?;
+            let slice_samples = (DECODE_SLICE_SECS * engine.sample_rate).min(audio_buffer.len());
+            let decode_buf = &audio_buffer[audio_buffer.len() - slice_samples..];
+
+            transcribe_and_print(
+                &engine,
+                decode_buf,
+                &mut last_printed_len,
+                &mut last_output,
+                &options,
+            )?;
             last_decode = Instant::now();
 
             if audio_buffer.len() > engine.max_samples {
@@ -182,6 +206,7 @@ fn transcribe_and_print(
     engine: &Engine,
     audio_buffer: &[f32],
     last_printed_len: &mut usize,
+    last_output: &mut String,
     options: &WhisperOptions,
 ) -> Result<()> {
     let segments = engine
@@ -190,14 +215,23 @@ fn transcribe_and_print(
         .context("running whisper transcription")?;
 
     let full_text = segments.join("");
-    if full_text.len() > *last_printed_len {
-        let new_part = &full_text[*last_printed_len..];
-        print!("{new_part}");
+    let mut common = 0usize;
+    for (a, b) in full_text.chars().zip(last_output.chars()) {
+        if a == b {
+            common += 1;
+        } else {
+            break;
+        }
+    }
+    let new_tail: String = full_text.chars().skip(common).collect();
+    if !new_tail.is_empty() {
+        print!("{new_tail}");
         io::stdout()
             .flush()
             .context("flushing transcription output to stdout")?;
-        *last_printed_len = full_text.len();
     }
+    *last_printed_len = full_text.len();
+    *last_output = full_text;
     Ok(())
 }
 

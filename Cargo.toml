@@ -10,3 +10,8 @@ ct2rs = { version = "0.9.14", default-features = false, features = ["whisper", "
 
 [patch.crates-io]
 sentencepiece-sys = { path = "patches/sentencepiece-sys-0.12.0" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
