@@ -6,4 +6,4 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 alsa = "0.10"
-ct2rs = { version = "0.9.14", default-features = false, features = ["whisper", "hub", "tokenizers"] }
+ct2rs = { version = "0.9.14", default-features = false, features = ["whisper", "hub", "tokenizers", "ruy"] }

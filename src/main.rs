@@ -1,5 +1,7 @@
 use std::env;
+use std::fs;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use alsa::pcm::{Access, Format, HwParams, PCM};
@@ -33,6 +35,8 @@ fn init_engine() -> Result<Engine> {
     let model_dir =
         download_model(&model_id).with_context(|| format!("downloading model {}", model_id))?;
 
+    ensure_preprocessor_config(&model_dir)?;
+
     let mut config = Config::default();
     config.device = Device::CPU;
     config.compute_type = ComputeType::AUTO;
@@ -49,6 +53,32 @@ fn init_engine() -> Result<Engine> {
         sample_rate,
         max_samples,
     })
+}
+
+fn ensure_preprocessor_config(model_dir: &Path) -> Result<()> {
+    let path: PathBuf = model_dir.join("preprocessor_config.json");
+    if path.exists() {
+        return Ok(());
+    }
+
+    // Whisper defaults compatible with 16 kHz models such as faster-whisper.
+    let json = r#"{
+  "chunk_length": 30,
+  "feature_extractor_type": "WhisperFeatureExtractor",
+  "feature_size": 80,
+  "hop_length": 160,
+  "n_fft": 400,
+  "n_samples": 480000,
+  "nb_max_frames": 3000,
+  "padding_side": "right",
+  "padding_value": 0.0,
+  "processor_class": "WhisperProcessor",
+  "return_attention_mask": false,
+  "sampling_rate": 16000
+}"#;
+
+    fs::write(&path, json).with_context(|| format!("writing {}", path.display()))?;
+    Ok(())
 }
 
 fn open_alsa_capture(sample_rate: u32) -> Result<PCM> {
