@@ -1,2 +1,1 @@
-[env]
-CXXFLAGS = "-include cstdint"
+# CPU-only build: no special toolchain env needed.

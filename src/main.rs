@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 
 use alsa::pcm::{Access, Format, HwParams, PCM};
 use alsa::{Direction, ValueOr};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
+use ct2rs::sys::get_device_count;
 use ct2rs::{ComputeType, Config, Device, Whisper, WhisperOptions, download_model};
 
 const DEFAULT_MODEL_ID: &str = "Systran/faster-whisper-tiny.en";
@@ -20,10 +21,23 @@ struct Engine {
     language: String,
     sample_rate: usize,
     max_samples: usize,
+    device: Device,
+    compute_type: ComputeType,
+    model_id: String,
+    model_dir: PathBuf,
 }
 
 fn main() -> Result<()> {
     let engine = init_engine()?;
+    eprintln!(
+        "typervox config: device={:?}, compute_type={:?}, model_id={}, model_path={}, lang={}, sample_rate={}Hz",
+        engine.device,
+        engine.compute_type,
+        engine.model_id,
+        engine.model_dir.display(),
+        engine.language,
+        engine.sample_rate
+    );
     let pcm = open_alsa_capture(engine.sample_rate as u32)?;
     capture_loop(pcm, engine)
 }
@@ -37,22 +51,45 @@ fn init_engine() -> Result<Engine> {
 
     ensure_preprocessor_config(&model_dir)?;
 
-    let mut config = Config::default();
-    config.device = Device::CPU;
-    config.compute_type = ComputeType::AUTO;
+    let compute_type = ComputeType::AUTO;
+    let mut last_err: Option<anyhow::Error> = None;
 
-    let whisper = Whisper::new(&model_dir, config)
-        .with_context(|| format!("loading whisper model from {}", model_dir.display()))?;
+    for device in device_candidates() {
+        let mut config = Config::default();
+        config.device = device;
+        config.compute_type = compute_type;
 
-    let sample_rate = whisper.sampling_rate();
-    let max_samples = sample_rate * MAX_BUFFER_SECS;
+        match Whisper::new(&model_dir, config) {
+            Ok(whisper) => {
+                let sample_rate = whisper.sampling_rate();
+                let max_samples = sample_rate * MAX_BUFFER_SECS;
+                return Ok(Engine {
+                    whisper,
+                    language,
+                    sample_rate,
+                    max_samples,
+                    device,
+                    compute_type,
+                    model_id,
+                    model_dir,
+                });
+            }
+            Err(err) => {
+                eprintln!("failed to init whisper on {:?}: {:#}", device, err);
+                last_err = Some(err);
+            }
+        }
+    }
 
-    Ok(Engine {
-        whisper,
-        language,
-        sample_rate,
-        max_samples,
-    })
+    Err(last_err.unwrap_or_else(|| anyhow!("failed to initialize whisper on any device")))
+}
+
+fn device_candidates() -> Vec<Device> {
+    if get_device_count(Device::CUDA) > 0 {
+        vec![Device::CUDA, Device::CPU]
+    } else {
+        vec![Device::CPU]
+    }
 }
 
 fn ensure_preprocessor_config(model_dir: &Path) -> Result<()> {

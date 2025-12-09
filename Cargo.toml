@@ -7,3 +7,6 @@ edition = "2024"
 anyhow = "1"
 alsa = "0.10"
 ct2rs = { version = "0.9.14", default-features = false, features = ["whisper", "hub", "tokenizers", "ruy"] }
+
+[patch.crates-io]
+sentencepiece-sys = { path = "patches/sentencepiece-sys-0.12.0" }
